@@ -1,0 +1,12 @@
+{
+  "judge_model": "gpt-5-nano",
+  "judge_base_url": "https://api.openai.com/v1",
+  "input": "./outputs/NDAKG-VNH3045-gpt-5-nano-falcon-dedup/qa_output.csv",
+  "output": "outputs/NDAKG-VNH3045-gpt-5-nano-falcon-dedup/qa_eval.csv",
+  "rows": 60,
+  "judged": 60,
+  "acc": 37,
+  "err": 18,
+  "judge_failures": 0,
+  "finished_at": "2026-10-28T16:15:19"
+}

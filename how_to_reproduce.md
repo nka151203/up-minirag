@@ -375,9 +375,93 @@ Sau đó sửa `ANA_FILE_PATH` trong notebook thành `./logs/eval_input.csv`.
 
 ---
 
-## 8. (Tuỳ chọn) Chạy nhanh end-to-end và các chế độ khác
+## 8. (Tuỳ chọn) Tái sử dụng index cho dedup node
 
-### 8.1. Smoke test bằng `main.py`
+Bước dedup node (`reproduce/Step_0_1_falcon_duplication.py`) là **tuỳ chọn** và
+**không phải dependency** của pipeline `index → QA → eval`. Script chạy trên bản
+copy của thư mục index, nên có thể tái sử dụng index đã tạo mà không cần trích
+xuất lại từ tài liệu.
+
+### 8.1. Luồng chạy
+
+Giả sử `$WORKDIR` là thư mục do `Step_0_index.py` tạo (ví dụ `./LiHua-World`
+hoặc `./outputs/NDAKG-VNH3045-<model>-<emb>`):
+
+```bash
+# 1) Baseline (nếu chưa có): index -> QA -> eval
+python3 reproduce/Step_0_index.py --workingdir "$WORKDIR"
+python3 reproduce/Step_1_QA.py --workingdir "$WORKDIR" \
+  --querypath ./dataset/LiHua-World/qa/query_set.csv \
+  --outputpath ./logs/default_output.csv
+python3 reproduce/Step_2_eval.py \
+  --input ./logs/default_output.csv --output ./logs/default_eval.csv
+
+# 2) Dedup trên bản copy (baseline không bị sửa)
+python3 reproduce/Step_0_1_falcon_duplication.py \
+  --workingdir "$WORKDIR" \
+  --outputdir "${WORKDIR}-dedup" \
+  --force \
+  --embedding-backend hf \
+  --embedding-model sentence-transformers/all-MiniLM-L6-v2 \
+  --embedding-dim 384
+
+# 3) QA + eval trên bản dedup — KHÔNG chạy index lại
+python3 reproduce/Step_1_QA.py --workingdir "${WORKDIR}-dedup" \
+  --querypath ./dataset/LiHua-World/qa/query_set.csv \
+  --outputpath "${WORKDIR}-dedup/qa_output.csv"
+python3 reproduce/Step_2_eval.py \
+  --input "${WORKDIR}-dedup/qa_output.csv" \
+  --output "${WORKDIR}-dedup/qa_eval.csv"
+```
+
+Với NDAKG-VNH3045 có thể dùng wrapper thay cho hai lệnh cuối:
+
+```bash
+WORKDIR=./outputs/<run>-dedup ./reproduce/run_ndakg_vnh3045.sh qa
+WORKDIR=./outputs/<run>-dedup ./reproduce/run_ndakg_vnh3045.sh eval
+```
+
+### 8.2. Dedup tái sử dụng những gì
+
+`Step_0_1_falcon_duplication.py` copy nguyên thư mục index sang `--outputdir`:
+
+- `graph_chunk_entity_relation.graphml`
+- `vdb_chunks.json`, `vdb_entities.json`, `vdb_entities_name.json`, `vdb_relationships.json`
+- `kv_store_*` (chunk, full docs, doc status…)
+
+Sau đó script chỉ:
+
+- gộp các node trùng trên graph trong bản copy,
+- xoá vector của các node bị gộp,
+- rebuild `relationships_vdb`,
+- ghi graph đã gộp xuống GraphML.
+
+`vdb_chunks.json` và toàn bộ chunk/text store giữ nguyên, nên QA `mode="mini"`
+vẫn chạy bình thường. Script cũng xoá `qa_output.csv`/`qa_eval.csv` **trong bản
+copy** để QA chạy lại sạch; kết quả baseline không bị ảnh hưởng.
+
+### 8.3. Lưu ý
+
+- **Embedding phải khớp lúc index.** Dedup re-embed relationship/entity vectors;
+  nếu index dùng HF 384 mà dedup chạy OpenAI 1536 (hoặc ngược lại) thì vector DB
+  lệch chiều. Truyền đúng `--embedding-backend/--embedding-model/--embedding-dim`
+  như lúc index.
+- **Vẫn cần cấu hình LLM trong `.env`.** `Step_0_1` dùng `EndpointConfig.from_args()`
+  nên yêu cầu `OPENAI_API_BASE`, `OPENAI_API_KEY`, `LLM_MODEL`, dù bản thân dedup
+  không gọi LLM — chỉ gọi embedding.
+- **Không chạy `run_ndakg_vnh3045.sh all` cho bản dedup**, vì `all` sẽ index lại
+  từ đầu. Chỉ chạy `qa`/`eval` như trên.
+- `--outputdir` phải khác `--workingdir`; nếu thư mục đã tồn tại thì cần `--force`.
+- Script dedup hiện giả định graph storage là NetworkX (`_graph`); không chạy được
+  với Neo4j.
+- Bỏ qua dedup thì pipeline `index → QA → eval` vẫn chạy bình thường; dedup chỉ là
+  bước cải thiện chất lượng graph, không phải điều kiện bắt buộc.
+
+---
+
+## 9. (Tuỳ chọn) Chạy nhanh end-to-end và các chế độ khác
+
+### 9.1. Smoke test bằng `main.py`
 
 ```bash
 python3 main.py --workingdir ./LiHua-World --datapath ./dataset/LiHua-World/data/
@@ -386,7 +470,7 @@ python3 main.py --workingdir ./LiHua-World --datapath ./dataset/LiHua-World/data
 - Vai trò: index toàn bộ dữ liệu rồi chạy **một câu hỏi toy** và in câu trả lời ra màn hình. Phù hợp để kiểm tra nhanh endpoint/môi trường.
 - Lưu ý: `main.py` cũng gọi `rag.insert()` cho toàn bộ 442 file, nên nếu đã index rồi thì dùng `--workingdir` riêng hoặc bỏ qua bước này.
 
-### 8.2. Chế độ truy vấn khác
+### 9.2. Chế độ truy vấn khác
 
 MiniRAG hỗ trợ 3 mode qua `QueryParam(mode=...)`:
 
@@ -398,7 +482,7 @@ MiniRAG hỗ trợ 3 mode qua `QueryParam(mode=...)`:
 
 Có thể đổi mode trong `Step_1_QA.py` tại dòng `rag.query(..., param=QueryParam(mode="mini"))`.
 
-### 8.3. API server (tuỳ chọn)
+### 9.3. API server (tuỳ chọn)
 
 ```bash
 pip install -e ".[api]"
@@ -418,7 +502,7 @@ minirag-server \
 - Sau khi dọn provider, server chỉ chấp nhận binding `openai` cho cả LLM và embedding.
 - Nhớ đặt `--embedding-dim` đúng với model (ví dụ `text-embedding-3-small` = 1536).
 
-### 8.4. Docker (tuỳ chọn)
+### 9.4. Docker (tuỳ chọn)
 
 ```bash
 docker compose up --build
@@ -429,7 +513,7 @@ docker compose up --build
 
 ---
 
-## 9. Kiểm tra kết quả và dọn dẹp
+## 10. Kiểm tra kết quả và dọn dẹp
 
 ```bash
 # Kiểm tra số file dữ liệu
@@ -453,7 +537,7 @@ rm -f logs/default_output.csv
 
 ---
 
-## 10. Lỗi thường gặp
+## 11. Lỗi thường gặp
 
 | Lỗi / triệu chứng | Nguyên nhân | Cách xử lý |
 |---|---|---|
@@ -464,6 +548,10 @@ rm -f logs/default_output.csv
 | `Connection error` / timeout | Sai base URL hoặc endpoint không truy cập được | Kiểm tra `OPENAI_API_BASE`, thường phải có `/v1` ở cuối |
 | `KeyError`/lỗi shape khi query vector | `--embedding-dim` không khớp model embedding | Đặt đúng dim (hf: 384, text-embedding-3-small: 1536) và index lại |
 | Đổi embedding nhưng kết quả lỗi | Index cũ tạo bằng embedding khác | `rm -rf ./LiHua-World` rồi index lại |
+| Dedup báo `[ERROR] --outputdir đã tồn tại` | Thư mục output đã có từ lần chạy trước | Thêm `--force` hoặc chọn `--outputdir` khác |
+| Dedup báo `[ERROR] Không tìm thấy graph trong: ...` | `--workingdir` sai hoặc chưa index | Kiểm tra `graph_chunk_entity_relation.graphml`, chạy `Step_0_index.py` trước |
+| Dedup/QA trên bản dedup lỗi shape vector | Embedding lúc dedup khác lúc index | Truyền đúng `--embedding-backend/--embedding-model/--embedding-dim` như lúc index rồi chạy lại dedup |
+| Dedup không gộp được node trùng | Index cũ thiếu `alternative_names`, hoặc tên chuẩn hoá không trùng | Gộp chỉ xảy ra khi tên chuẩn hoá trùng nhau hoặc nằm trong alias; index lại bằng prompt mở rộng nếu cần |
 | `torch` / `transformers` không có | Đang dùng embedding `hf` nhưng chưa cài | `pip install torch transformers`, hoặc chuyển `--embedding-backend openai` |
 | Embedding API lỗi `404 /embeddings` | Endpoint không hỗ trợ embeddings | Dùng `--embedding-backend hf` (mặc định) |
 | Notebook lỗi `KeyError: 'naive'` | CSV đầu vào thiếu cột baseline | Dùng đoạn chuẩn bị ở mục 7.2 hoặc sửa notebook chỉ chấm `minirag` |
@@ -472,7 +560,7 @@ rm -f logs/default_output.csv
 
 ---
 
-## 11. Bảng tóm tắt câu lệnh
+## 12. Bảng tóm tắt câu lệnh
 
 | # | Câu lệnh | Vai trò |
 |---|---|---|
@@ -486,12 +574,15 @@ rm -f logs/default_output.csv
 | 8 | `python3 reproduce/Step_0_A_graph_statistic.py --workingdir ./LiHua-World` | In số node/cạnh và thống kê knowledge graph vừa tạo |
 | 9 | `python3 reproduce/Step_1_QA.py --workingdir ./LiHua-World --outputpath ./logs/default_output.csv` | Trả lời 637 câu hỏi qua endpoint, ghi CSV |
 | 10 | `jupyter notebook dataset/LiHua-World/evaluation.ipynb` | Chấm điểm bằng LLM judge, tính acc/err |
-| 11 | `python3 main.py --model <model>` | (Tuỳ chọn) smoke test end-to-end với một câu hỏi toy |
-| 12 | `rm -rf ./LiHua-World logs/default_output.csv` | (Tuỳ chọn) xoá index/kết quả để chạy lại từ đầu |
+| 11 | `python3 reproduce/Step_0_1_falcon_duplication.py --workingdir ./LiHua-World --outputdir ./LiHua-World-dedup --force` | (Tuỳ chọn) Gộp node trùng trên bản copy, tái sử dụng index |
+| 12 | `python3 reproduce/Step_1_QA.py --workingdir ./LiHua-World-dedup --outputpath ./LiHua-World-dedup/qa_output.csv` | (Tuỳ chọn) QA trên graph đã dedup, không index lại |
+| 13 | `python3 reproduce/Step_2_eval.py --input ./LiHua-World-dedup/qa_output.csv --output ./LiHua-World-dedup/qa_eval.csv` | (Tuỳ chọn) Chấm điểm kết quả bản dedup |
+| 14 | `python3 main.py --model <model>` | (Tuỳ chọn) smoke test end-to-end với một câu hỏi toy |
+| 15 | `rm -rf ./LiHua-World logs/default_output.csv` | (Tuỳ chọn) xoá index/kết quả để chạy lại từ đầu |
 
 ---
 
-## 12. Tóm tắt luồng reproduce
+## 13. Tóm tắt luồng reproduce
 
 ```text
 Dataset (dataset/LiHua-World/)
@@ -507,16 +598,20 @@ Step_0_index.py                             │
         ▼                                   │
 ./LiHua-World/  (graph + KV + vector DB)    │
         │                                   │
-        └──────────► Step_1_QA.py ◄─────────┘
-                     LLM: cùng endpoint
-                     Embedding: cùng cấu hình
-                            │
-                            ▼
-                 logs/default_output.csv
-                            │
-                            ▼
-              evaluation.ipynb (LLM judge)
-                            │
-                            ▼
-                       acc / err
+        ├──────────► Step_1_QA.py ◄─────────┘
+        │             LLM: cùng endpoint
+        │             Embedding: cùng cấu hình
+        │                    │
+        │                    ▼
+        │         logs/default_output.csv
+        │                    │
+        │                    ▼
+        │          evaluation.ipynb (LLM judge) -> acc / err
+        │
+        └── (tuỳ chọn) Step_0_1_falcon_duplication.py
+                 │ copy + gộp node (không index lại)
+                 ▼
+        ./LiHua-World-dedup/  (graph đã gộp + vector DB)
+                 │
+                 └──► Step_1_QA.py -> Step_2_eval.py
 ```
