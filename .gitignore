@@ -26,5 +26,4 @@ examples/output/
 *.ini
 build/
 minirag-venv/
-dataset/
 __pycache__
